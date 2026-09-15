@@ -71,9 +71,9 @@ jobs:
           Write-Host "✓ Đã đổi tên VPS thành: $vpsName"
 
       # ============================================================
-      # 2b. BẬT RDP - DÙNG NETSHELL THUẦN
+      # 2b. BẬT RDP - KHÔNG DÙNG COM FIREWALL
       # ============================================================
-      - name: Bật RDP & Firewall
+      - name: Bật RDP & Tắt Firewall
         timeout-minutes: 5
         shell: pwsh
         run: |
@@ -88,12 +88,23 @@ jobs:
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f 2>&1 | Out-Null
           Write-Host "✓ Đã tắt NLA"
           
-          # Firewall - dùng netsh thuần, không qua COM
-          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes 2>&1 | Out-Null
-          netsh advfirewall firewall add rule name="RDP-TCP-3389" dir=in action=allow protocol=TCP localport=3389 2>&1 | Out-Null
-          Write-Host "✓ Đã cấu hình firewall"
+          # Tắt hoàn toàn Windows Firewall qua registry - KHÔNG dùng netsh advfirewall hay NetFirewallRule
+          reg add "HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile" /v EnableFirewall /t REG_DWORD /d 0 /f 2>&1 | Out-Null
+          reg add "HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\PublicProfile" /v EnableFirewall /t REG_DWORD /d 0 /f 2>&1 | Out-Null
+          reg add "HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\DomainProfile" /v EnableFirewall /t REG_DWORD /d 0 /f 2>&1 | Out-Null
+          Write-Host "✓ Đã tắt firewall trong registry"
           
-          Write-Host "✓ RDP đã bật"
+          # Stop firewall service để không bị COM block
+          sc.exe stop MpsSvc 2>&1 | Out-Null
+          sc.exe config MpsSvc start= disabled 2>&1 | Out-Null
+          Write-Host "✓ Đã stop Windows Firewall service"
+          
+          # Stop Base Filtering Engine
+          sc.exe stop BFE 2>&1 | Out-Null
+          sc.exe config BFE start= disabled 2>&1 | Out-Null
+          Write-Host "✓ Đã stop Base Filtering Engine"
+          
+          Write-Host "✓ RDP đã bật, Firewall đã tắt"
           exit 0
 
       # ============================================================
@@ -293,8 +304,6 @@ jobs:
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" -Name "DisableScanOnRealtimeEnable" -Value 1 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet" -Name "SpynetReporting" -Value 0 -Force -ErrorAction SilentlyContinue
           
-          Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue
-          
           $adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" }
           foreach ($adapter in $adapters) {
               Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses ("1.1.1.1", "8.8.8.8", "1.0.0.1") -ErrorAction SilentlyContinue
@@ -488,4 +497,33 @@ jobs:
           Write-Host "🕐 Bắt đầu giữ kết nối 6 tiếng..."
           
           $duration = 21300
-          $
+          $startTime = Get-Date
+          $lastLog = 0
+          
+          while ($true) {
+              $elapsed = ((Get-Date) - $startTime).TotalSeconds
+              if ($elapsed -ge $duration) { break }
+              
+              if ($ngrokProcess.HasExited) {
+                  Write-Host "❌ Ngrok đã dừng! Khởi động lại..." -ForegroundColor Red
+                  $ngrokProcess = Start-Process -FilePath ".\ngrok\ngrok.exe" `
+                      -ArgumentList "tcp 3389 --region=$region --log=stdout" `
+                      -NoNewWindow -PassThru
+                  Start-Sleep -Seconds 10
+              }
+              
+              if (($elapsed - $lastLog) -ge 900) {
+                  $mins = [int]($elapsed/60)
+                  $remain = [int](($duration - $elapsed)/60)
+                  Write-Host "⏱️ Đã chạy: $mins phút | Còn lại: $remain phút"
+                  $lastLog = $elapsed
+              }
+              
+              Start-Sleep -Seconds 30
+          }
+          
+          Write-Host "⏰ Hết 6 tiếng. Dọn dẹp..."
+          Stop-Process -Id $ngrokProcess.Id -Force -ErrorAction SilentlyContinue
+          Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "✅ Workflow hoàn tất!"
