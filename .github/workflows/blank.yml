@@ -61,18 +61,17 @@ jobs:
           
           Rename-Computer -NewName $vpsName -Force -ErrorAction SilentlyContinue
           
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName" -Name "ComputerName" -Value $vpsName -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName" -Name "ComputerName" -Value $vpsName -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "Hostname" -Value $vpsName -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "NV Hostname" -Value $vpsName -Force -ErrorAction SilentlyContinue
-          
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "RegisteredOwner" -Value "DucThangTechDz" -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "RegisteredOrganization" -Value "DucThangTechDz VPS" -Force -ErrorAction SilentlyContinue
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName" /v ComputerName /t REG_SZ /d $vpsName /f 2>&1 | Out-Null
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName" /v ComputerName /t REG_SZ /d $vpsName /f 2>&1 | Out-Null
+          reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v Hostname /t REG_SZ /d $vpsName /f 2>&1 | Out-Null
+          reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" /v "NV Hostname" /t REG_SZ /d $vpsName /f 2>&1 | Out-Null
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v RegisteredOwner /t REG_SZ /d "DucThangTechDz" /f 2>&1 | Out-Null
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v RegisteredOrganization /t REG_SZ /d "DucThangTechDz VPS" /f 2>&1 | Out-Null
           
           Write-Host "✓ Đã đổi tên VPS thành: $vpsName"
 
       # ============================================================
-      # 2b. BẬT RDP
+      # 2b. BẬT RDP - DÙNG NETSHELL THUẦN
       # ============================================================
       - name: Bật RDP & Firewall
         timeout-minutes: 5
@@ -80,40 +79,19 @@ jobs:
         run: |
           $ErrorActionPreference = "Continue"
           
-          # Bật RDP qua registry
-          try {
-              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force -ErrorAction Stop
-              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "AllowTSConnections" -Value 1 -Force -ErrorAction Stop
-              Write-Host "✓ Đã bật RDP trong registry"
-          } catch {
-              Write-Host "⚠️ Lỗi registry RDP: $_"
-          }
+          # Bật RDP qua reg.exe - không dùng COM
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f 2>&1 | Out-Null
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v AllowTSConnections /t REG_DWORD /d 1 /f 2>&1 | Out-Null
+          Write-Host "✓ Đã bật RDP trong registry"
           
-          # Bật firewall rule cho RDP - dùng try/catch và fallback
-          try {
-              Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction Stop
-              Write-Host "✓ Đã enable firewall group Remote Desktop"
-          } catch {
-              Write-Host "⚠️ Enable-NetFirewallRule thất bại, thử netsh..."
-              netsh advfirewall firewall set rule group="remote desktop" new enable=Yes 2>&1 | Out-Null
-          }
+          # Tắt NLA
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f 2>&1 | Out-Null
+          Write-Host "✓ Đã tắt NLA"
           
-          # Tạo rule mới cho port 3389 - dùng try/catch và fallback
-          try {
-              New-NetFirewallRule -DisplayName "RDP-TCP-3389" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -ErrorAction Stop
-              Write-Host "✓ Đã tạo firewall rule RDP-TCP-3389"
-          } catch {
-              Write-Host "⚠️ New-NetFirewallRule thất bại, thử netsh..."
-              netsh advfirewall firewall add rule name="RDP-TCP-3389" dir=in action=allow protocol=TCP localport=3389 2>&1 | Out-Null
-          }
-          
-          # Tắt NLA để dễ kết nối
-          try {
-              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force -ErrorAction Stop
-              Write-Host "✓ Đã tắt NLA"
-          } catch {
-              Write-Host "⚠️ Không tắt được NLA: $_"
-          }
+          # Firewall - dùng netsh thuần, không qua COM
+          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes 2>&1 | Out-Null
+          netsh advfirewall firewall add rule name="RDP-TCP-3389" dir=in action=allow protocol=TCP localport=3389 2>&1 | Out-Null
+          Write-Host "✓ Đã cấu hình firewall"
           
           Write-Host "✓ RDP đã bật"
           exit 0
@@ -181,7 +159,6 @@ jobs:
               "Microsoft.DesktopAppInstaller", "Microsoft.Services.Store.Engagement"
           )
           
-          # Xóa từng gói riêng biệt, bọc try/catch để tránh crash
           $packages = Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue
           foreach ($pkg in $packages) {
               $name = $pkg.Name
@@ -196,7 +173,6 @@ jobs:
               } catch { }
           }
           
-          # Xóa provisioned packages
           $provPkgs = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
           foreach ($pkg in $provPkgs) {
               $name = $pkg.DisplayName
@@ -211,7 +187,6 @@ jobs:
               } catch { }
           }
           
-          # Tắt IE Enhanced Security Configuration
           $adminKey = "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}"
           $userKey = "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A8-37EF-4b3f-8CFC-4F3A74704073}"
           Set-ItemProperty -Path $adminKey -Name "IsInstalled" -Value 0 -Force -ErrorAction SilentlyContinue
@@ -219,10 +194,7 @@ jobs:
           
           Stop-Process -Name Explorer -Force -ErrorAction SilentlyContinue
           
-          # Tắt Server Manager auto-start
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\ServerManager" -Name "DoNotOpenServerManagerAtLogon" -Value 1 -Force -ErrorAction SilentlyContinue
-          
-          # Tắt Shutdown Event Tracker
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Reliability" -Name "ShutdownReasonOn" -Value 0 -Force -ErrorAction SilentlyContinue
           
           Write-Host "✓ Debloat hoàn tất"
@@ -259,7 +231,6 @@ jobs:
           Write-Host "===== TỐI ƯU MẠNG - ZERO LAG ====="
           $ErrorActionPreference = "Continue"
           
-          # ---------- TCP/IP STACK ----------
           netsh int tcp set global autotuninglevel=normal | Out-Null
           netsh int tcp set global rss=enabled | Out-Null
           netsh int tcp set global chimney=disabled | Out-Null
@@ -271,7 +242,6 @@ jobs:
           netsh int tcp set heuristics disabled | Out-Null
           netsh int tcp set supplemental Internet congestionprovider=ctcp | Out-Null
           
-          # ---------- TCP REGISTRY - GIẢM DELAY ----------
           $tcp = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
           $tcpIf = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
           
@@ -285,14 +255,12 @@ jobs:
           Set-ItemProperty -Path $tcp -Name "MaxUserPort" -Value 65534 -Type DWord -Force
           Set-ItemProperty -Path $tcp -Name "TcpTimedWaitDelay" -Value 30 -Type DWord -Force
           
-          # Áp dụng cho TẤT CẢ network interfaces
           Get-ChildItem $tcpIf -ErrorAction SilentlyContinue | ForEach-Object {
               Set-ItemProperty -Path $_.PSPath -Name "TcpAckFrequency" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
               Set-ItemProperty -Path $_.PSPath -Name "TCPNoDelay" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
               Set-ItemProperty -Path $_.PSPath -Name "TcpDelAckTicks" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
           }
           
-          # ---------- QoS CHO RDP ----------
           New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\QoS\RDP" -Force | Out-Null
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\QoS\RDP" -Name "Version" -Value "1.0" -Type String -Force
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\QoS\RDP" -Name "Application Name" -Value "*.exe" -Type String -Force
@@ -306,7 +274,6 @@ jobs:
           
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Psched" -Name "NonBestEffortLimit" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
           
-          # ---------- MULTIMEDIA NETWORK THROTTLING ----------
           $mmPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
           Set-ItemProperty -Path $mmPath -Name "NetworkThrottlingIndex" -Value 0xffffffff -Type DWord -Force
           Set-ItemProperty -Path $mmPath -Name "SystemResponsiveness" -Value 0 -Type DWord -Force
@@ -321,22 +288,18 @@ jobs:
               Set-ItemProperty -Path $p -Name "GPU Priority" -Value 8 -Type DWord -Force -ErrorAction SilentlyContinue
           }
           
-          # ---------- DISABLE DEFENDER NETWORK INSPECTION ----------
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" -Name "DisableRealtimeMonitoring" -Value 1 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" -Name "DisableBehaviorMonitoring" -Value 1 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" -Name "DisableScanOnRealtimeEnable" -Value 1 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet" -Name "SpynetReporting" -Value 0 -Force -ErrorAction SilentlyContinue
           
-          # Tắt Firewall
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue
           
-          # ---------- DNS TỐI ƯU ----------
           $adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" }
           foreach ($adapter in $adapters) {
               Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses ("1.1.1.1", "8.8.8.8", "1.0.0.1") -ErrorAction SilentlyContinue
           }
           
-          # ---------- DISABLE NETWORK SERVICES NGỐN TÀI NGUYÊN ----------
           $netServices = @("SNMPTRAP", "SNMP", "RemoteAccess", "SharedAccess", "WlanSvc")
           foreach ($svc in $netServices) {
               Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
@@ -357,7 +320,6 @@ jobs:
           $tsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           if (-not (Test-Path $tsPath)) { New-Item -Path $tsPath -Force | Out-Null }
           
-          # Graphics
           Set-ItemProperty -Path $tsPath -Name "AVC444ModePreferred" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $tsPath -Name "bEnumerateHWBeforeSW" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $tsPath -Name "EnableRemoteFXAdvancedRemoteApp" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
@@ -367,7 +329,6 @@ jobs:
           Set-ItemProperty -Path $tsPath -Name "fEnableFontSmoothing" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $tsPath -Name "fEnableDesktopComposition" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
           
-          # RDP-Tcp endpoint
           $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
           
           Set-ItemProperty -Path $rdpTcp -Name "ColorDepth" -Value 4 -Type DWord -Force
@@ -380,7 +341,6 @@ jobs:
           Set-ItemProperty -Path $rdpTcp -Name "MaxIdleTime" -Value 0 -Type DWord -Force
           Set-ItemProperty -Path $rdpTcp -Name "MaxConnectionTime" -Value 0 -Type DWord -Force
           
-          # Timeout policies
           Set-ItemProperty -Path $tsPath -Name "MaxDisconnectionTime" -Value 0 -Type DWord -Force
           Set-ItemProperty -Path $tsPath -Name "MaxIdleTime" -Value 0 -Type DWord -Force
           Set-ItemProperty -Path $tsPath -Name "MaxConnectionTime" -Value 0 -Type DWord -Force
@@ -389,8 +349,6 @@ jobs:
           Set-ItemProperty -Path $tsPath -Name "fResetBroken" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
           
           Set-ItemProperty -Path $tsPath -Name "DisableRemoteAppPublishing" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-          
-          # UDP transport
           Set-ItemProperty -Path $tsPath -Name "SelectTransport" -Value 1 -Type DWord -Force
           Set-ItemProperty -Path $tsPath -Name "UDPTransport" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
           
@@ -424,27 +382,23 @@ jobs:
           
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -Value 0 -Force -ErrorAction SilentlyContinue
           
-          # Visual effects
           Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -Force
           Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKCU:\Control Panel\Desktop\WindowMetrics" -Name "MinAnimate" -Value 0 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value 0 -Force -ErrorAction SilentlyContinue
           
-          # RAM
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters" -Name "EnablePrefetcher" -Value 0 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters" -Name "EnableSuperfetch" -Value 0 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "LargeSystemCache" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "DisablePagingExecutive" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "ClearPageFileAtShutdown" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
           
-          # Dọn rác
           Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
           
           Dism.exe /online /Cleanup-Image /StartComponentCleanup /ResetBase 2>&1 | Out-Null
           
-          # Power
           powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
           powercfg /change monitor-timeout-ac 0
           powercfg /change monitor-timeout-dc 0
@@ -523,7 +477,8 @@ jobs:
           if ($publicUrl) {
               Write-Host "======================================================================"
               Write-Host "  🌐 ĐỊA CHỈ RDP: $publicUrl" -ForegroundColor Green
-              Write-Host "  📌 Copy phần sau 'tcp://' vào Remote Desktop" -ForegroundColor Yellow              Write-Host "  📌 Hoặc dùng: $($publicUrl -replace 'tcp://', '')" -ForegroundColor Yellow
+              Write-Host "  📌 Copy phần sau 'tcp://' vào Remote Desktop" -ForegroundColor Yellow
+              Write-Host "  📌 Hoặc dùng: $($publicUrl -replace 'tcp://', '')" -ForegroundColor Yellow
               Write-Host "======================================================================"
           } else {
               Write-Host "⚠️ Không lấy được URL. Log Ngrok:"
@@ -533,33 +488,4 @@ jobs:
           Write-Host "🕐 Bắt đầu giữ kết nối 6 tiếng..."
           
           $duration = 21300
-          $startTime = Get-Date
-          $lastLog = 0
-          
-          while ($true) {
-              $elapsed = ((Get-Date) - $startTime).TotalSeconds
-              if ($elapsed -ge $duration) { break }
-              
-              if ($ngrokProcess.HasExited) {
-                  Write-Host "❌ Ngrok đã dừng! Khởi động lại..." -ForegroundColor Red
-                  $ngrokProcess = Start-Process -FilePath ".\ngrok\ngrok.exe" `
-                      -ArgumentList "tcp 3389 --region=$region --log=stdout" `
-                      -NoNewWindow -PassThru
-                  Start-Sleep -Seconds 10
-              }
-              
-              if (($elapsed - $lastLog) -ge 900) {
-                  $mins = [int]($elapsed/60)
-                  $remain = [int](($duration - $elapsed)/60)
-                  Write-Host "⏱️ Đã chạy: $mins phút | Còn lại: $remain phút"
-                  $lastLog = $elapsed
-              }
-              
-              Start-Sleep -Seconds 30
-          }
-          
-          Write-Host "⏰ Hết 6 tiếng. Dọn dẹp..."
-          Stop-Process -Id $ngrokProcess.Id -Force -ErrorAction SilentlyContinue
-          Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          
-          Write-Host "✅ Workflow hoàn tất!"
+          $
