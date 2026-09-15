@@ -53,6 +53,8 @@ jobs:
       # ============================================================
       - name: Đổi tên VPS & Kích hoạt RDP & Tạo User
         shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           # ============ ĐỔI TÊN VPS ============
           $vpsName = "DucThangTechDzVPS"
@@ -81,28 +83,54 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "AllowTSConnections" -Value 1 -Force -ErrorAction SilentlyContinue
           
           # Firewall cho RDP
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes | Out-Null
-          netsh advfirewall firewall add rule name="RDP-TCP-3389" dir=in action=allow protocol=TCP localport=3389 | Out-Null
-          
+          # Không để mã trả về của netsh làm GitHub Actions fail.
+          try {
+              Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction Stop
+          } catch {
+              Write-Host "⚠️ Không tìm thấy group Remote Desktop; tạo rule 3389."
+          }
+
+          & netsh advfirewall firewall add rule name="RDP-TCP-3389" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+          $netshExit = $LASTEXITCODE
+          if ($netshExit -ne 0) {
+              Write-Host "⚠️ netsh trả về exit code $netshExit; tiếp tục."
+          }
+          $global:LASTEXITCODE = 0
+
           # ============ TẠO USER ============
           $username = "DucthengTechDz"
-          $password = "W1nd0ws-P4ssw0rd-2026!"
-          $secPass = ConvertTo-SecureString $password -AsPlainText -Force
-          
-          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
-              Set-LocalUser -Name $username -Password $secPass
-          } else {
-              New-LocalUser -Name $username -Password $secPass -FullName $username -PasswordNeverExpires -AccountNeverExpires
+          $password = $env:RDP_PASSWORD
+          if ([string]::IsNullOrWhiteSpace($password)) {
+              throw "Thiếu secret RDP_PASSWORD trong GitHub Actions."
           }
-          
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
-          
+          $secPass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          $existingUser = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+          if ($null -ne $existingUser) {
+              Set-LocalUser -Name $username -Password $secPass -ErrorAction Stop
+          } else {
+              New-LocalUser -Name $username -Password $secPass -FullName $username `
+                  -PasswordNeverExpires -AccountNeverExpires -ErrorAction Stop | Out-Null
+          }
+
+          # Chỉ thêm user nếu chưa thuộc nhóm, tránh lỗi "already a member".
+          $rdpMember = Get-LocalGroupMember -Group "Remote Desktop Users" -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match "\\$([regex]::Escape($username))$" }
+          if (-not $rdpMember) {
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction Stop
+          }
+
+          $adminMember = Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match "\\$([regex]::Escape($username))$" }
+          if (-not $adminMember) {
+              Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction Stop
+          }
+
           # Tắt NLA để dễ kết nối
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          
-          Write-Host "✓ RDP đã bật - User: $username / Pass: $password"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+              -Name "UserAuthentication" -Value 0 -Force -ErrorAction Stop
+
+          Write-Host "✓ RDP đã bật - User: $username"
           Write-Host "✓ VPS Name: $vpsName"
 
       # ============================================================
@@ -452,7 +480,7 @@ jobs:
           
           Write-Host "🕐 Bắt đầu giữ kết nối 6 tiếng..."
           
-          $duration = 21300
+          $duration = 21600
           $startTime = Get-Date
           $lastLog = 0
           
