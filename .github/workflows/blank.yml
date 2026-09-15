@@ -52,28 +52,23 @@ jobs:
       # 2. ĐỔI TÊN VPS & BẬT RDP
       # ============================================================
       - name: Đổi tên VPS & Kích hoạt RDP & Tạo User
-        shell: pwsh
+        shell: pwsh -File {0}
         run: |
-          # ============ ĐỔI TÊN VPS ============
           $ErrorActionPreference = "Continue"
+          
+          # ============ ĐỔI TÊN VPS ============
           $vpsName = "DucThangTechDzVPS"
           Write-Host "→ Đang đổi tên VPS thành: $vpsName"
           
-          # Đổi ComputerName
           Rename-Computer -NewName $vpsName -Force -ErrorAction SilentlyContinue
           
-          # Đổi tên hiển thị trong System Properties
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName" -Name "ComputerName" -Value $vpsName -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName" -Name "ComputerName" -Value $vpsName -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "Hostname" -Value $vpsName -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "NV Hostname" -Value $vpsName -Force -ErrorAction SilentlyContinue
           
-          # Đổi tên hiển thị Windows (ProductName)
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "RegisteredOwner" -Value "DucThangTechDz" -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "RegisteredOrganization" -Value "DucThangTechDz VPS" -Force -ErrorAction SilentlyContinue
-          
-          # Đổi EditionID để hiển thị đẹp (tuỳ chọn)
-          # Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "EditionID" -Value "DucThangTechDzVPS" -Force -ErrorAction SilentlyContinue
           
           Write-Host "✓ Đã đổi tên VPS thành: $vpsName"
           
@@ -81,7 +76,6 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "AllowTSConnections" -Value 1 -Force -ErrorAction SilentlyContinue
           
-          # Firewall cho RDP
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
           netsh advfirewall firewall set rule group="remote desktop" new enable=Yes 2>&1 | Out-Null
           netsh advfirewall firewall add rule name="RDP-TCP-3389" dir=in action=allow protocol=TCP localport=3389 2>&1 | Out-Null
@@ -97,18 +91,38 @@ jobs:
               New-LocalUser -Name $username -Password $secPass -FullName $username -PasswordNeverExpires -AccountNeverExpires -ErrorAction SilentlyContinue
           }
           
-          try {
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
-          } catch { }
-          try {
-              Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
-          } catch { }
+          # Thêm vào Remote Desktop Users nếu chưa có
+          $rdpMembers = Get-LocalGroupMember -Group "Remote Desktop Users" -ErrorAction SilentlyContinue
+          if (-not ($rdpMembers | Where-Object { $_.Name -like "*$username" })) {
+              try {
+                  Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction Stop
+                  Write-Host "✓ Đã thêm $username vào Remote Desktop Users"
+              } catch {
+                  Write-Host "⚠️ Không thêm được vào Remote Desktop Users: $_"
+              }
+          } else {
+              Write-Host "✓ $username đã có trong Remote Desktop Users"
+          }
+          
+          # Thêm vào Administrators nếu chưa có
+          $adminMembers = Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue
+          if (-not ($adminMembers | Where-Object { $_.Name -like "*$username" })) {
+              try {
+                  Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction Stop
+                  Write-Host "✓ Đã thêm $username vào Administrators"
+              } catch {
+                  Write-Host "⚠️ Không thêm được vào Administrators: $_"
+              }
+          } else {
+              Write-Host "✓ $username đã có trong Administrators"
+          }
           
           # Tắt NLA để dễ kết nối
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force -ErrorAction SilentlyContinue
           
           Write-Host "✓ RDP đã bật - User: $username / Pass: $password"
           Write-Host "✓ VPS Name: $vpsName"
+          exit 0
 
       # ============================================================
       # 3. DEBLOAT WINDOWS SERVER 2025
