@@ -49,14 +49,13 @@ jobs:
           Write-Host "✓ Ngrok đã xác thực"
 
       # ============================================================
-      # 2. ĐỔI TÊN VPS & BẬT RDP
+      # 2. ĐỔI TÊN VPS
       # ============================================================
-      - name: Đổi tên VPS & Kích hoạt RDP & Tạo User
-        shell: pwsh -File {0}
+      - name: Đổi tên VPS
+        timeout-minutes: 3
+        shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
-          
-          # ============ ĐỔI TÊN VPS ============
           $vpsName = "DucThangTechDzVPS"
           Write-Host "→ Đang đổi tên VPS thành: $vpsName"
           
@@ -71,27 +70,47 @@ jobs:
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "RegisteredOrganization" -Value "DucThangTechDz VPS" -Force -ErrorAction SilentlyContinue
           
           Write-Host "✓ Đã đổi tên VPS thành: $vpsName"
+
+      # ============================================================
+      # 2b. BẬT RDP
+      # ============================================================
+      - name: Bật RDP & Firewall
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
           
-          # ============ BẬT RDP ============
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "AllowTSConnections" -Value 1 -Force -ErrorAction SilentlyContinue
           
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes 2>&1 | Out-Null
-          netsh advfirewall firewall add rule name="RDP-TCP-3389" dir=in action=allow protocol=TCP localport=3389 2>&1 | Out-Null
+          New-NetFirewallRule -DisplayName "RDP-TCP-3389" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -ErrorAction SilentlyContinue
           
-          # ============ TẠO USER ============
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "✓ RDP đã bật"
+
+      # ============================================================
+      # 2c. TẠO USER
+      # ============================================================
+      - name: Tạo User & Phân quyền
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          
           $username = "DucthengTechDz"
           $password = "W1nd0ws-P4ssw0rd-2026!"
           $secPass = ConvertTo-SecureString $password -AsPlainText -Force
           
           if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
               Set-LocalUser -Name $username -Password $secPass -ErrorAction SilentlyContinue
+              Write-Host "✓ User $username đã tồn tại, đã cập nhật mật khẩu"
           } else {
               New-LocalUser -Name $username -Password $secPass -FullName $username -PasswordNeverExpires -AccountNeverExpires -ErrorAction SilentlyContinue
+              Write-Host "✓ Đã tạo user $username"
           }
           
-          # Thêm vào Remote Desktop Users nếu chưa có
           $rdpMembers = Get-LocalGroupMember -Group "Remote Desktop Users" -ErrorAction SilentlyContinue
           if (-not ($rdpMembers | Where-Object { $_.Name -like "*$username" })) {
               try {
@@ -104,7 +123,6 @@ jobs:
               Write-Host "✓ $username đã có trong Remote Desktop Users"
           }
           
-          # Thêm vào Administrators nếu chưa có
           $adminMembers = Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue
           if (-not ($adminMembers | Where-Object { $_.Name -like "*$username" })) {
               try {
@@ -117,12 +135,7 @@ jobs:
               Write-Host "✓ $username đã có trong Administrators"
           }
           
-          # Tắt NLA để dễ kết nối
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force -ErrorAction SilentlyContinue
-          
-          Write-Host "✓ RDP đã bật - User: $username / Pass: $password"
-          Write-Host "✓ VPS Name: $vpsName"
-          exit 0
+          Write-Host "✓ User: $username / Pass: $password"
 
       # ============================================================
       # 3. DEBLOAT WINDOWS SERVER 2025
@@ -140,21 +153,42 @@ jobs:
               "Microsoft.DesktopAppInstaller", "Microsoft.Services.Store.Engagement"
           )
           
-          Get-AppxPackage -AllUsers | Where-Object {
-              $name = $_.Name
-              -not ($keepApps | Where-Object { $name -like "*$_*" })
-          } | Remove-AppxPackage -ErrorAction SilentlyContinue
+          # Xóa từng gói riêng biệt, bọc try/catch để tránh crash
+          $packages = Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+          foreach ($pkg in $packages) {
+              $name = $pkg.Name
+              $shouldKeep = $false
+              foreach ($keep in $keepApps) {
+                  if ($name -like "*$keep*") { $shouldKeep = $true; break }
+              }
+              if ($shouldKeep) { continue }
+              
+              try {
+                  Remove-AppxPackage -Package $pkg.PackageFullName -AllUsers -ErrorAction SilentlyContinue
+              } catch { }
+          }
           
-          Get-AppxProvisionedPackage -Online | Where-Object {
-              $name = $_.DisplayName
-              -not ($keepApps | Where-Object { $name -like "*$_*" })
-          } | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
+          # Xóa provisioned packages
+          $provPkgs = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
+          foreach ($pkg in $provPkgs) {
+              $name = $pkg.DisplayName
+              $shouldKeep = $false
+              foreach ($keep in $keepApps) {
+                  if ($name -like "*$keep*") { $shouldKeep = $true; break }
+              }
+              if ($shouldKeep) { continue }
+              
+              try {
+                  Remove-AppxProvisionedPackage -Online -PackageName $pkg.PackageName -ErrorAction SilentlyContinue
+              } catch { }
+          }
           
           # Tắt IE Enhanced Security Configuration
           $adminKey = "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}"
           $userKey = "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A8-37EF-4b3f-8CFC-4F3A74704073}"
           Set-ItemProperty -Path $adminKey -Name "IsInstalled" -Value 0 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path $userKey -Name "IsInstalled" -Value 0 -Force -ErrorAction SilentlyContinue
+          
           Stop-Process -Name Explorer -Force -ErrorAction SilentlyContinue
           
           # Tắt Server Manager auto-start
