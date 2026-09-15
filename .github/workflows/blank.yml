@@ -75,20 +75,48 @@ jobs:
       # 2b. BẬT RDP
       # ============================================================
       - name: Bật RDP & Firewall
-        timeout-minutes: 3
+        timeout-minutes: 5
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
           
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "AllowTSConnections" -Value 1 -Force -ErrorAction SilentlyContinue
+          # Bật RDP qua registry
+          try {
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force -ErrorAction Stop
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "AllowTSConnections" -Value 1 -Force -ErrorAction Stop
+              Write-Host "✓ Đã bật RDP trong registry"
+          } catch {
+              Write-Host "⚠️ Lỗi registry RDP: $_"
+          }
           
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-          New-NetFirewallRule -DisplayName "RDP-TCP-3389" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -ErrorAction SilentlyContinue
+          # Bật firewall rule cho RDP - dùng try/catch và fallback
+          try {
+              Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction Stop
+              Write-Host "✓ Đã enable firewall group Remote Desktop"
+          } catch {
+              Write-Host "⚠️ Enable-NetFirewallRule thất bại, thử netsh..."
+              netsh advfirewall firewall set rule group="remote desktop" new enable=Yes 2>&1 | Out-Null
+          }
           
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force -ErrorAction SilentlyContinue
+          # Tạo rule mới cho port 3389 - dùng try/catch và fallback
+          try {
+              New-NetFirewallRule -DisplayName "RDP-TCP-3389" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -ErrorAction Stop
+              Write-Host "✓ Đã tạo firewall rule RDP-TCP-3389"
+          } catch {
+              Write-Host "⚠️ New-NetFirewallRule thất bại, thử netsh..."
+              netsh advfirewall firewall add rule name="RDP-TCP-3389" dir=in action=allow protocol=TCP localport=3389 2>&1 | Out-Null
+          }
+          
+          # Tắt NLA để dễ kết nối
+          try {
+              Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force -ErrorAction Stop
+              Write-Host "✓ Đã tắt NLA"
+          } catch {
+              Write-Host "⚠️ Không tắt được NLA: $_"
+          }
           
           Write-Host "✓ RDP đã bật"
+          exit 0
 
       # ============================================================
       # 2c. TẠO USER
@@ -495,8 +523,7 @@ jobs:
           if ($publicUrl) {
               Write-Host "======================================================================"
               Write-Host "  🌐 ĐỊA CHỈ RDP: $publicUrl" -ForegroundColor Green
-              Write-Host "  📌 Copy phần sau 'tcp://' vào Remote Desktop" -ForegroundColor Yellow
-              Write-Host "  📌 Hoặc dùng: $($publicUrl -replace 'tcp://', '')" -ForegroundColor Yellow
+              Write-Host "  📌 Copy phần sau 'tcp://' vào Remote Desktop" -ForegroundColor Yellow              Write-Host "  📌 Hoặc dùng: $($publicUrl -replace 'tcp://', '')" -ForegroundColor Yellow
               Write-Host "======================================================================"
           } else {
               Write-Host "⚠️ Không lấy được URL. Log Ngrok:"
