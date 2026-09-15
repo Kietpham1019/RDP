@@ -139,25 +139,13 @@ jobs:
       - name: Windows Server 2025 - Debloat
         shell: pwsh
         run: |
-          Write-Host "===== DEBLOAT WINDOWS SERVER 2025 ====="
+          Write-Host "===== DEBLOAT WINDOWS SERVER 2025 (SAFE) ====="
           $ErrorActionPreference = "Continue"
           
-          $keepApps = @(
-              "Microsoft.WindowsStore", "Microsoft.StorePurchaseApp",
-              "Microsoft.WindowsTerminal", "Microsoft.VCLibs",
-              "Microsoft.NET", "Microsoft.UI.Xaml",
-              "Microsoft.DesktopAppInstaller", "Microsoft.Services.Store.Engagement"
-          )
-          
-          Get-AppxPackage -AllUsers | Where-Object {
-              $name = $_.Name
-              -not ($keepApps | Where-Object { $name -like "*$_*" })
-          } | Remove-AppxPackage -ErrorAction SilentlyContinue
-          
-          Get-AppxProvisionedPackage -Online | Where-Object {
-              $name = $_.DisplayName
-              -not ($keepApps | Where-Object { $name -like "*$_*" })
-          } | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
+          # Windows Server / GitHub-hosted runner có thể phát sinh
+          # COMException khi gỡ AppX. Phần này không cần thiết cho RDP,
+          # nên bỏ qua để workflow ổn định.
+          Write-Host "→ Bỏ qua gỡ AppX trên Windows Server runner."
           
           # Tắt IE Enhanced Security Configuration
           $adminKey = "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}"
@@ -389,7 +377,20 @@ jobs:
           Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
           
-          Dism.exe /online /Cleanup-Image /StartComponentCleanup /ResetBase 2>&1 | Out-Null
+          # DISM cleanup không bắt buộc; nếu runner từ chối thì chỉ cảnh báo.
+          try {
+              & DISM.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase | Out-Null
+              $dismExit = $LASTEXITCODE
+              if ($dismExit -ne 0) {
+                  Write-Host "⚠️ DISM trả về exit code $dismExit; bỏ qua và tiếp tục."
+              } else {
+                  Write-Host "✓ DISM cleanup hoàn tất"
+              }
+              $global:LASTEXITCODE = 0
+          } catch {
+              Write-Host "⚠️ DISM không chạy được trên runner; bỏ qua."
+              $global:LASTEXITCODE = 0
+          }
           
           # Power
           powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
