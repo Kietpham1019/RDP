@@ -53,8 +53,6 @@ jobs:
       # ============================================================
       - name: Đổi tên VPS & Kích hoạt RDP & Tạo User
         shell: pwsh
-        env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           # ============ ĐỔI TÊN VPS ============
           $vpsName = "DucThangTechDzVPS"
@@ -83,54 +81,28 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "AllowTSConnections" -Value 1 -Force -ErrorAction SilentlyContinue
           
           # Firewall cho RDP
-          # Không để mã trả về của netsh làm GitHub Actions fail.
-          try {
-              Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction Stop
-          } catch {
-              Write-Host "⚠️ Không tìm thấy group Remote Desktop; tạo rule 3389."
-          }
-
-          & netsh advfirewall firewall add rule name="RDP-TCP-3389" dir=in action=allow protocol=TCP localport=3389 | Out-Null
-          $netshExit = $LASTEXITCODE
-          if ($netshExit -ne 0) {
-              Write-Host "⚠️ netsh trả về exit code $netshExit; tiếp tục."
-          }
-          $global:LASTEXITCODE = 0
-
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes | Out-Null
+          netsh advfirewall firewall add rule name="RDP-TCP-3389" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+          
           # ============ TẠO USER ============
           $username = "DucthengTechDz"
-          $password = $env:RDP_PASSWORD
-          if ([string]::IsNullOrWhiteSpace($password)) {
-              throw "Thiếu secret RDP_PASSWORD trong GitHub Actions."
-          }
+          $password = "W1nd0ws-P4ssw0rd-2026!"
           $secPass = ConvertTo-SecureString $password -AsPlainText -Force
-
-          $existingUser = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
-          if ($null -ne $existingUser) {
-              Set-LocalUser -Name $username -Password $secPass -ErrorAction Stop
+          
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+              Set-LocalUser -Name $username -Password $secPass
           } else {
-              New-LocalUser -Name $username -Password $secPass -FullName $username `
-                  -PasswordNeverExpires -AccountNeverExpires -ErrorAction Stop | Out-Null
+              New-LocalUser -Name $username -Password $secPass -FullName $username -PasswordNeverExpires -AccountNeverExpires
           }
-
-          # Chỉ thêm user nếu chưa thuộc nhóm, tránh lỗi "already a member".
-          $rdpMember = Get-LocalGroupMember -Group "Remote Desktop Users" -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -match "\\$([regex]::Escape($username))$" }
-          if (-not $rdpMember) {
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction Stop
-          }
-
-          $adminMember = Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -match "\\$([regex]::Escape($username))$" }
-          if (-not $adminMember) {
-              Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction Stop
-          }
-
+          
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          
           # Tắt NLA để dễ kết nối
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-              -Name "UserAuthentication" -Value 0 -Force -ErrorAction Stop
-
-          Write-Host "✓ RDP đã bật - User: $username"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          
+          Write-Host "✓ RDP đã bật - User: $username / Pass: $password"
           Write-Host "✓ VPS Name: $vpsName"
 
       # ============================================================
@@ -139,13 +111,25 @@ jobs:
       - name: Windows Server 2025 - Debloat
         shell: pwsh
         run: |
-          Write-Host "===== DEBLOAT WINDOWS SERVER 2025 (SAFE) ====="
+          Write-Host "===== DEBLOAT WINDOWS SERVER 2025 ====="
           $ErrorActionPreference = "Continue"
           
-          # Windows Server / GitHub-hosted runner có thể phát sinh
-          # COMException khi gỡ AppX. Phần này không cần thiết cho RDP,
-          # nên bỏ qua để workflow ổn định.
-          Write-Host "→ Bỏ qua gỡ AppX trên Windows Server runner."
+          $keepApps = @(
+              "Microsoft.WindowsStore", "Microsoft.StorePurchaseApp",
+              "Microsoft.WindowsTerminal", "Microsoft.VCLibs",
+              "Microsoft.NET", "Microsoft.UI.Xaml",
+              "Microsoft.DesktopAppInstaller", "Microsoft.Services.Store.Engagement"
+          )
+          
+          Get-AppxPackage -AllUsers | Where-Object {
+              $name = $_.Name
+              -not ($keepApps | Where-Object { $name -like "*$_*" })
+          } | Remove-AppxPackage -ErrorAction SilentlyContinue
+          
+          Get-AppxProvisionedPackage -Online | Where-Object {
+              $name = $_.DisplayName
+              -not ($keepApps | Where-Object { $name -like "*$_*" })
+          } | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
           
           # Tắt IE Enhanced Security Configuration
           $adminKey = "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}"
@@ -377,20 +361,7 @@ jobs:
           Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
           
-          # DISM cleanup không bắt buộc; nếu runner từ chối thì chỉ cảnh báo.
-          try {
-              & DISM.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase | Out-Null
-              $dismExit = $LASTEXITCODE
-              if ($dismExit -ne 0) {
-                  Write-Host "⚠️ DISM trả về exit code $dismExit; bỏ qua và tiếp tục."
-              } else {
-                  Write-Host "✓ DISM cleanup hoàn tất"
-              }
-              $global:LASTEXITCODE = 0
-          } catch {
-              Write-Host "⚠️ DISM không chạy được trên runner; bỏ qua."
-              $global:LASTEXITCODE = 0
-          }
+          Dism.exe /online /Cleanup-Image /StartComponentCleanup /ResetBase 2>&1 | Out-Null
           
           # Power
           powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
@@ -481,7 +452,7 @@ jobs:
           
           Write-Host "🕐 Bắt đầu giữ kết nối 6 tiếng..."
           
-          $duration = 21600
+          $duration = 21300
           $startTime = Get-Date
           $lastLog = 0
           
