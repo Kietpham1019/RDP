@@ -155,29 +155,6 @@ jobs:
           }
 
       # ============================================================
-      # 4. CÀI CHROME + 7-ZIP
-      # ============================================================
-      - name: Cài đặt Chrome & 7-Zip
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Continue"
-          $temp = $env:TEMP
-          
-          Write-Host "→ Đang cài Google Chrome..."
-          $chromeInstaller = "$temp\chrome_installer.exe"
-          Invoke-WebRequest "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile $chromeInstaller
-          Start-Process -FilePath $chromeInstaller -Args "/silent /install" -Wait
-          Remove-Item $chromeInstaller -Force -ErrorAction SilentlyContinue
-          
-          Write-Host "→ Đang cài 7-Zip..."
-          $sevenZip = "$temp\7z-installer.exe"
-          Invoke-WebRequest "https://www.7-zip.org/a/7z2408-x64.exe" -OutFile $sevenZip
-          Start-Process -FilePath $sevenZip -Args "/S" -Wait
-          Remove-Item $sevenZip -Force -ErrorAction SilentlyContinue
-          
-          Write-Host "✓ Chrome & 7-Zip đã cài xong"
-
-      # ============================================================
       # 5. TỐI ƯU MẠNG - ZERO LAG
       # ============================================================
       - name: Tối ưu Mạng - Zero Delay - Zero Lag
