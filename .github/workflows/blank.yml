@@ -76,56 +76,83 @@ jobs:
           
           Write-Host "✓ Đã đổi tên VPS thành: $vpsName"
           
-          # ============ BẬT RDP ============
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "AllowTSConnections" -Value 1 -Force -ErrorAction SilentlyContinue
-          
-          # Firewall cho RDP
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes | Out-Null
-          netsh advfirewall firewall add rule name="RDP-TCP-3389" dir=in action=allow protocol=TCP localport=3389 | Out-Null
-          
-          # ============ TẠO USER ============
-          $username = "DucthengTechDz"
-          $password = "W1nd0ws-P4ssw0rd-2026!"
-          $secPass = ConvertTo-SecureString $password -AsPlainText -Force
+          # ============ BẬT RDP ==========
+          $ErrorActionPreference = "Stop"
 
-          $user = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+          try {
+              # Bật RDP
+              Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+                  -Name "fDenyTSConnections" -Value 0 -Force
 
-          if ($null -ne $user) {
-              Set-LocalUser -Name $username -Password $secPass
-              Enable-LocalUser -Name $username -ErrorAction SilentlyContinue
-              Write-Host "✓ User đã tồn tại - đã cập nhật password"
+              # Bật firewall rule cho RDP
+              Get-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue |
+                  Enable-NetFirewallRule -ErrorAction SilentlyContinue
+
+              # ============ TẠO USER ============
+              $username = "DucthengTechDz"
+              $password = "W1nd0ws-P4ssw0rd-2026!"
+              $secPass = ConvertTo-SecureString $password -AsPlainText -Force
+
+              $user = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+
+              if ($null -eq $user) {
+                  New-LocalUser -Name $username -Password $secPass `
+                      -FullName $username -Description "RDP User" `
+                      -PasswordNeverExpires -AccountNeverExpires | Out-Null
+                  Write-Host "✓ Đã tạo user: $username"
+              }
+              else {
+                  Set-LocalUser -Name $username -Password $secPass
+                  Enable-LocalUser -Name $username
+                  Write-Host "✓ User đã tồn tại - đã cập nhật password"
+              }
+
+              # ============ THÊM QUYỀN RDP ============
+              $rdpGroup = Get-LocalGroup -SID "S-1-5-32-555"
+              $rdpMember = Get-LocalGroupMember -Group $rdpGroup.Name -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -match "\\$([regex]::Escape($username))$" }
+
+              if ($null -eq $rdpMember) {
+                  Add-LocalGroupMember -Group $rdpGroup.Name -Member $username
+              }
+
+              # ============ THÊM QUYỀN ADMIN ============
+              $adminGroup = Get-LocalGroup -SID "S-1-5-32-544"
+              $adminMember = Get-LocalGroupMember -Group $adminGroup.Name -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -match "\\$([regex]::Escape($username))$" }
+
+              if ($null -eq $adminMember) {
+                  Add-LocalGroupMember -Group $adminGroup.Name -Member $username
+              }
+
+              # ============ RDP SERVICE ============
+              Set-Service -Name "TermService" -StartupType Automatic
+              if ((Get-Service -Name "TermService").Status -ne "Running") {
+                  Start-Service -Name "TermService"
+              }
+
+              # ============ KIỂM TRA ============
+              $checkUser = Get-LocalUser -Name $username -ErrorAction Stop
+              if (-not $checkUser.Enabled) {
+                  throw "User $username đang bị Disabled."
+              }
+
+              $rdpValue = (Get-ItemProperty `
+                  -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+                  -Name "fDenyTSConnections").fDenyTSConnections
+
+              if ($rdpValue -ne 0) {
+                  throw "Không bật được RDP (fDenyTSConnections=$rdpValue)."
+              }
+
+              Write-Host "✓ RDP đã bật - User: $username / Pass: $password"
+              Write-Host "✓ VPS Name: $vpsName"
           }
-          else {
-              New-LocalUser `
-                -Name $username `
-                -Password $secPass `
-                -FullName $username `
-                -Description "RDP User" `
-                -PasswordNeverExpires `
-                -AccountNeverExpires
-              Write-Host "✓ Đã tạo user: $username"
+          catch {
+              Write-Host "❌ LỖI BƯỚC RDP/USER: $($_.Exception.Message)" -ForegroundColor Red
+              Write-Host "Chi tiết: $($_.ScriptStackTrace)" -ForegroundColor Yellow
+              exit 1
           }
-
-          # ============ QUYỀN RDP ============
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
-
-          # ============ QUYỀN ADMIN ============
-          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
-
-          # ============ GIỮ NLA BẬT ============
-          Set-ItemProperty `
-            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-            -Name "UserAuthentication" `
-            -Value 1 `
-            -Force
-
-          Set-Service -Name "TermService" -StartupType Automatic -ErrorAction SilentlyContinue
-          Start-Service -Name "TermService" -ErrorAction SilentlyContinue
-
-          Write-Host "✓ RDP đã bật - User: $username / Pass: $password"
-          Write-Host "✓ VPS Name: $vpsName"
 
       # ============================================================
       # 3. DEBLOAT WINDOWS
