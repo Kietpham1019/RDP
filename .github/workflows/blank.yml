@@ -1,4 +1,4 @@
-name: RDP-DucThangTechDzVPS-WinServer2025-ZeroLag-6Hours
+name: RDP-DucThangTechDzVPS-Windows-6Hours
 
 on:
   workflow_dispatch:
@@ -89,29 +89,51 @@ jobs:
           $username = "DucthengTechDz"
           $password = "W1nd0ws-P4ssw0rd-2026!"
           $secPass = ConvertTo-SecureString $password -AsPlainText -Force
-          
-          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+
+          $user = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+
+          if ($null -ne $user) {
               Set-LocalUser -Name $username -Password $secPass
-          } else {
-              New-LocalUser -Name $username -Password $secPass -FullName $username -PasswordNeverExpires -AccountNeverExpires
+              Enable-LocalUser -Name $username -ErrorAction SilentlyContinue
+              Write-Host "✓ User đã tồn tại - đã cập nhật password"
           }
-          
+          else {
+              New-LocalUser `
+                -Name $username `
+                -Password $secPass `
+                -FullName $username `
+                -Description "RDP User" `
+                -PasswordNeverExpires `
+                -AccountNeverExpires
+              Write-Host "✓ Đã tạo user: $username"
+          }
+
+          # ============ QUYỀN RDP ============
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+
+          # ============ QUYỀN ADMIN ============
           Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
-          
-          # Tắt NLA để dễ kết nối
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          
+
+          # ============ GIỮ NLA BẬT ============
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" `
+            -Value 1 `
+            -Force
+
+          Set-Service -Name "TermService" -StartupType Automatic -ErrorAction SilentlyContinue
+          Start-Service -Name "TermService" -ErrorAction SilentlyContinue
+
           Write-Host "✓ RDP đã bật - User: $username / Pass: $password"
           Write-Host "✓ VPS Name: $vpsName"
 
       # ============================================================
-      # 3. DEBLOAT WINDOWS SERVER 2025
+      # 3. DEBLOAT WINDOWS
       # ============================================================
-      - name: Windows Server 2025 - Debloat
+      - name: Windows - Debloat
         shell: pwsh
         run: |
-          Write-Host "===== DEBLOAT WINDOWS SERVER 2025 ====="
+          Write-Host "===== DEBLOAT WINDOWS ====="
           $ErrorActionPreference = "Continue"
           
           $keepApps = @(
@@ -246,8 +268,7 @@ jobs:
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" -Name "DisableScanOnRealtimeEnable" -Value 1 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet" -Name "SpynetReporting" -Value 0 -Force -ErrorAction SilentlyContinue
           
-          # Tắt Firewall
-          Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue
+          # Giữ Windows Firewall hoạt động để bảo vệ RDP.
           
           # ---------- DNS TỐI ƯU ----------
           $adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" }
@@ -382,22 +403,19 @@ jobs:
           Write-Host "✓ ECO Mode đã kích hoạt"
 
       # ============================================================
-      # 8. TẮT DEFENDER REAL-TIME
+      # 8. KIỂM TRA WINDOWS DEFENDER
       # ============================================================
-      - name: Tắt Windows Defender Real-time
+      - name: Kiểm tra Windows Defender
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
           try {
-              Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-              Set-MpPreference -DisableBehaviorMonitoring $true -ErrorAction SilentlyContinue
-              Set-MpPreference -DisableIOAVProtection $true -ErrorAction SilentlyContinue
-              Set-MpPreference -DisableScriptScanning $true -ErrorAction SilentlyContinue
-              Set-MpPreference -MAPSReporting Disabled -ErrorAction SilentlyContinue
-              Set-MpPreference -SubmitSamplesConsent NeverSend -ErrorAction SilentlyContinue
-              Write-Host "✓ Defender real-time đã tắt"
+              $status = Get-MpComputerStatus -ErrorAction Stop
+              Write-Host "✓ Defender đang hoạt động."
+              Write-Host "  Real-time: $($status.RealTimeProtectionEnabled)"
+              Write-Host "  Antivirus: $($status.AntivirusEnabled)"
           } catch {
-              Write-Host "⚠️ Không thể tắt Defender: $_"
+              Write-Host "⚠️ Không đọc được trạng thái Defender: $_"
           }
 
       # ============================================================
@@ -408,7 +426,7 @@ jobs:
         run: |
           Write-Host "======================================================================"
           Write-Host "  🖥️  VPS: DucThangTechDzVPS"
-          Write-Host "  🚀 WINDOWS SERVER 2025 - SUPER FAST - ZERO LAG"
+          Write-Host "  🚀 WINDOWS - RDP OPTIMIZED"
           Write-Host "======================================================================"
           Write-Host "  Tài khoản : DucthengTechDz"
           Write-Host "  Mật khẩu  : W1nd0ws-P4ssw0rd-2026!"
@@ -452,7 +470,7 @@ jobs:
           
           Write-Host "🕐 Bắt đầu giữ kết nối 6 tiếng..."
           
-          $duration = 21300
+          $duration = 21600
           $startTime = Get-Date
           $lastLog = 0
           
