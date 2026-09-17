@@ -1,4 +1,4 @@
-name: WINDOWS 2025 RDP
+name: WINDOWS LATEST RDP
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-2025
+    runs-on: windows-latest
     timeout-minutes: 9999
 
     steps:
