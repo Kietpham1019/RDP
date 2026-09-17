@@ -1,407 +1,138 @@
-name: RDP-DucThangTechDzVPS-Windows-6Hours
+#.github/workflows/main.yml
+name: Windows - Ngrok
 
-on:
-  workflow_dispatch:
-    inputs:
-      ngrok_download_url:
-        description: 'Ngrok Windows (amd64) ZIP direct link'
-        required: true
-        default: 'https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip'
-      ngrok_region:
-        description: 'Ngrok Region (ap = Singapore, us = US, eu = Europe)'
-        required: false
-        default: 'ap'
+on: workflow_dispatch
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+  RDP_USER: admin
+  RDP_PASS: p@ssw0rd!
 
 jobs:
-  build:
-    runs-on: windows-2022
-    timeout-minutes: 360
+  ngrok-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 9999
 
     steps:
-      - name: Setup UTF-8 & Environment
-        shell: pwsh
-        run: |
-          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-          $ErrorActionPreference = "Continue"
-          Write-Host "✓ Environment sẵn sàng"
+    - name: Setup Windows Remote Desktop
+      run: |
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
 
-      # ============================================================
-      # 1. DOWNLOAD NGROK
-      # ============================================================
-      - name: Download & Extract Ngrok
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          Invoke-WebRequest -Uri "${{ github.event.inputs.ngrok_download_url }}" -OutFile ngrok.zip
-          Expand-Archive ngrok.zip -DestinationPath ngrok -Force
-          Write-Host "✓ Ngrok đã sẵn sàng"
+        if ("$env:RDP_USER" -eq "runneradmin") {
+          Write-Host "Warning: Using default user account!"
+          Set-LocalUser -Name $env:RDP_USER -Password (ConvertTo-SecureString "$env:RDP_PASS" -AsPlainText -Force)
+        } else {
+          New-LocalUser -Name "$env:RDP_USER" -Password (ConvertTo-SecureString "$env:RDP_PASS" -AsPlainText -Force) *>$null
+          Add-LocalGroupMember -Group "Administrators" -Member "$env:RDP_USER"
+          Enable-LocalUser -Name "$env:RDP_USER"
+        }
+        
+        icacls "C:\Windows\Temp" /grant "$env:RDP_USER`:F" *>$null
+        icacls "C:\Windows\installer" /grant "$env:RDP_USER`:F" *>$null
 
-      - name: Authenticate Ngrok
-        shell: pwsh
-        env:
-          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-        run: |
-          if (-not $Env:NGROK_AUTH_TOKEN) {
-            Write-Error "❌ Thiếu secret NGROK_AUTH_TOKEN!"
+        Set-Service -Name "W32Time" -StartupType Automatic -ErrorAction Stop *>$null
+        Restart-Service W32Time *>$null
+        w32tm /resync /force *>$null
+        w32tm /config /manualpeerlist:"time.windows.com" /syncfromflags:manual /reliable:yes /update *>$null
+        
+        diskperf -Y *>$null
+        "$env:TEMP\*" | Remove-Item -Recurse -Force
+        "C:\Windows\Temp\*" | Remove-Item -Recurse -Force
+        "C:\Windows\Prefetch\*" | Remove-Item -Recurse -Force
+        "C:\Users\Public\Desktop\*" | Remove-Item -Recurse -Force
+        (New-Object -ComObject Shell.Application).Namespace(0xA).Items() | %{Remove-Item $_.Path -Recurse -Confirm:$false}
+        (New-Object -ComObject Shell.Application).minimizeall()
+        
+    - name: Install and Configure Ngrok
+      run: |
+        Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
+        Expand-Archive ngrok.zip -DestinationPath .\ngrok
+        .\ngrok\ngrok.exe authtoken $env:NGROK_AUTH_TOKEN
+
+    - name: Start Ngrok Tunnel
+      run: |
+        $maxRetries = 3
+        $retryCount = 0
+        $success = $false
+
+        while (-not $success -and $retryCount -lt $maxRetries) {
+          Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389" -WindowStyle Hidden
+
+          $attempts = 0
+          $maxAttempts = 10
+          $ngrokUrl = $null
+
+          while (-not $ngrokUrl -and $attempts -lt $maxAttempts) {
+            Start-Sleep -Seconds 5
+            $attempts++
+            
+            try {
+              $tunnels = Invoke-RestMethod -Uri http://localhost:4040/api/tunnels
+              $ngrokUrl = ($tunnels.tunnels | Where-Object { $_.proto -eq 'tcp' }).public_url
+            } catch {
+              Write-Host "Attempt $attempts`: Waiting for Ngrok to start..."
+            }
+          }
+
+          if (-not $ngrokUrl) {
+            Write-Host "Failed to retrieve Ngrok URL after $maxAttempts attempts."
+            $retryCount++
+            continue
+          }
+
+          $ngrokUrl = $ngrokUrl -replace "^tcp://", ""
+          $address, $port = $ngrokUrl -split ":" 
+          
+          $testResult = Test-NetConnection -ComputerName $address -Port $port
+          if ($testResult.TcpTestSucceeded) {
+            $success = $true
+            $remoteAddress = $testResult.RemoteAddress.IPAddressToString
+            Write-Host "RDP Connection Details"
+            Write-Host "URL: $remoteAddress`:$port"
+            Write-Host "Username: $env:RDP_USER"
+            Write-Host "Password: $env:RDP_PASS"
+            
+          } else {
+            Write-Host "Connection test failed. Retrying..."
+            Get-Process ngrok | Stop-Process -Force
+            $retryCount++
+            Start-Sleep -Seconds 5
+          }
+        }
+
+        if (-not $success) {
+          throw "Failed to establish a working Ngrok tunnel after $maxRetries attempts."
+        }
+        
+    - name: Keep Alive
+      run: |
+        $duration = 21600  # 6 hours in seconds
+        $interval = 300    # Check every 5 minutes
+        $endTime = (Get-Date).AddSeconds($duration)
+
+        while ((Get-Date) -lt $endTime) {
+          $ngrokProcess = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
+          if (-not $ngrokProcess) {
+            Write-Host "Ngrok process not found. Exiting workflow."
             exit 1
           }
-          .\ngrok\ngrok.exe config add-authtoken $Env:NGROK_AUTH_TOKEN
-          Write-Host "✓ Ngrok đã xác thực"
 
-      # ============================================================
-      # 2. ĐỔI TÊN VPS & BẬT RDP
-      # ============================================================
-      - name: Đổi tên VPS & Kích hoạt RDP & Tạo User
-        shell: pwsh
-        run: |
-          # ============ ĐỔI TÊN VPS ============
-          $vpsName = "DucThangTechDzVPS"
-          Write-Host "→ Đang đổi tên VPS thành: $vpsName"
-          
-          # Đổi ComputerName
-          Rename-Computer -NewName $vpsName -Force -ErrorAction SilentlyContinue
-          
-          # Đổi tên hiển thị trong System Properties
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName" -Name "ComputerName" -Value $vpsName -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName" -Name "ComputerName" -Value $vpsName -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "Hostname" -Value $vpsName -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "NV Hostname" -Value $vpsName -Force -ErrorAction SilentlyContinue
-          
-          # Đổi tên hiển thị Windows (ProductName)
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "RegisteredOwner" -Value "DucThangTechDz" -Force -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "RegisteredOrganization" -Value "DucThangTechDz VPS" -Force -ErrorAction SilentlyContinue
-          
-          # Đổi EditionID để hiển thị đẹp (tuỳ chọn)
-          # Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "EditionID" -Value "DucThangTechDzVPS" -Force -ErrorAction SilentlyContinue
-          
-          Write-Host "✓ Đã đổi tên VPS thành: $vpsName"
-          
-          # ============ BẬT RDP ==========
-          $ErrorActionPreference = "Stop"
+          Start-Sleep -Seconds $interval
+        }
 
-          try {
-              # Bật RDP
-              Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
-                  -Name "fDenyTSConnections" -Value 0 -Force
-
-              # Bật firewall rule cho RDP
-              Get-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue |
-                  Enable-NetFirewallRule -ErrorAction SilentlyContinue
-
-              # ============ TẠO USER ============
-              $username = "DucthengTechDz"
-              $password = "W1nd0ws-P4ssw0rd-2026!"
-              $secPass = ConvertTo-SecureString $password -AsPlainText -Force
-
-              $user = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
-
-              if ($null -eq $user) {
-                  New-LocalUser -Name $username -Password $secPass `
-                      -FullName $username -Description "RDP User" `
-                      -PasswordNeverExpires -AccountNeverExpires | Out-Null
-                  Write-Host "✓ Đã tạo user: $username"
-              }
-              else {
-                  Set-LocalUser -Name $username -Password $secPass
-                  Enable-LocalUser -Name $username
-                  Write-Host "✓ User đã tồn tại - đã cập nhật password"
-              }
-
-              # ============ THÊM QUYỀN RDP ============
-              $rdpGroup = Get-LocalGroup -SID "S-1-5-32-555"
-              $rdpMember = Get-LocalGroupMember -Group $rdpGroup.Name -ErrorAction SilentlyContinue |
-                  Where-Object { $_.Name -match "\\$([regex]::Escape($username))$" }
-
-              if ($null -eq $rdpMember) {
-                  Add-LocalGroupMember -Group $rdpGroup.Name -Member $username
-              }
-
-              # ============ THÊM QUYỀN ADMIN ============
-              $adminGroup = Get-LocalGroup -SID "S-1-5-32-544"
-              $adminMember = Get-LocalGroupMember -Group $adminGroup.Name -ErrorAction SilentlyContinue |
-                  Where-Object { $_.Name -match "\\$([regex]::Escape($username))$" }
-
-              if ($null -eq $adminMember) {
-                  Add-LocalGroupMember -Group $adminGroup.Name -Member $username
-              }
-
-              # ============ RDP SERVICE ============
-              Set-Service -Name "TermService" -StartupType Automatic
-              if ((Get-Service -Name "TermService").Status -ne "Running") {
-                  Start-Service -Name "TermService"
-              }
-
-              # ============ KIỂM TRA ============
-              $checkUser = Get-LocalUser -Name $username -ErrorAction Stop
-              if (-not $checkUser.Enabled) {
-                  throw "User $username đang bị Disabled."
-              }
-
-              $rdpValue = (Get-ItemProperty `
-                  -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
-                  -Name "fDenyTSConnections").fDenyTSConnections
-
-              if ($rdpValue -ne 0) {
-                  throw "Không bật được RDP (fDenyTSConnections=$rdpValue)."
-              }
-
-              Write-Host "✓ RDP đã bật - User: $username / Pass: $password"
-              Write-Host "✓ VPS Name: $vpsName"
-          }
-          catch {
-              Write-Host "❌ LỖI BƯỚC RDP/USER: $($_.Exception.Message)" -ForegroundColor Red
-              Write-Host "Chi tiết: $($_.ScriptStackTrace)" -ForegroundColor Yellow
-              exit 1
-          }
-
-     
-      # ============================================================
-      # 9. START NGROK & KEEP-ALIVE 6H
-      # ============================================================
-      - name: Start Ngrok & Keep-Alive (6 Hours)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Continue"
-
-          Write-Host "======================================================================"
-          Write-Host "  VPS: DucThangTechDzVPS"
-          Write-Host "  WINDOWS - RDP OPTIMIZED"
-          Write-Host "======================================================================"
-          Write-Host "  Tài khoản : DucthengTechDz"
-          Write-Host "  Mật khẩu  : W1nd0ws-P4ssw0rd-2026!"
-          Write-Host "  VPS Name  : DucThangTechDzVPS"
-          Write-Host "  Region    : ${{ github.event.inputs.ngrok_region }}"
-          Write-Host "  Thời gian : 6 TIẾNG (360 PHÚT)"
-          Write-Host "======================================================================"
-
-          # ------------------------------------------------------------
-          # PATH + CONFIG
-          # ------------------------------------------------------------
-          $ngrokExe = Join-Path $PWD "ngrok\ngrok.exe"
-          $region = "${{ github.event.inputs.ngrok_region }}"
-          $outLog = Join-Path $env:TEMP "ngrok_out.log"
-          $errLog = Join-Path $env:TEMP "ngrok_err.log"
-
-          if (-not (Test-Path $ngrokExe)) {
-              Write-Error "Không tìm thấy ngrok.exe: $ngrokExe"
-              exit 1
-          }
-
-          # ------------------------------------------------------------
-          # KIỂM TRA RDP 3389
-          # ------------------------------------------------------------
-          Write-Host "→ Kiểm tra RDP port 3389..."
-
-          $rdpListener = Get-NetTCPConnection `
-              -LocalPort 3389 `
-              -State Listen `
-              -ErrorAction SilentlyContinue
-
-          if ($null -eq $rdpListener) {
-              Write-Host "⚠️ Port 3389 chưa LISTEN. Khởi động TermService..." -ForegroundColor Yellow
-              Set-Service -Name "TermService" -StartupType Automatic -ErrorAction SilentlyContinue
-              Start-Service -Name "TermService" -ErrorAction SilentlyContinue
-              Start-Sleep -Seconds 5
-
-              $rdpListener = Get-NetTCPConnection `
-                  -LocalPort 3389 `
-                  -State Listen `
-                  -ErrorAction SilentlyContinue
-          }
-
-          if ($null -eq $rdpListener) {
-              Write-Error "RDP không LISTEN trên port 3389. Không thể khởi động Ngrok TCP 3389."
-              exit 1
-          }
-
-          Write-Host "✓ RDP port 3389 đang LISTEN." -ForegroundColor Green
-
-          # ------------------------------------------------------------
-          # HÀM START NGROK
-          # ------------------------------------------------------------
-          function Start-NgrokTunnel {
-              param([string]$Executable, [string]$Region)
-
-              Remove-Item $outLog -Force -ErrorAction SilentlyContinue
-              Remove-Item $errLog -Force -ErrorAction SilentlyContinue
-
-              Write-Host "→ Khởi động Ngrok..."
-
-              $proc = Start-Process `
-                  -FilePath $Executable `
-                  -ArgumentList @(
-                      "tcp",
-                      "3389",
-                      "--region=$Region",
-                      "--log=stdout",
-                      "--log-format=json"
-                  ) `
-                  -NoNewWindow `
-                  -PassThru `
-                  -RedirectStandardOutput $outLog `
-                  -RedirectStandardError $errLog
-
-              return $proc
-          }
-
-          # ------------------------------------------------------------
-          # LẤY URL TỪ NGROK API
-          # ------------------------------------------------------------
-          function Get-NgrokPublicUrl {
-              param([int]$Attempts = 12)
-
-              for ($i = 1; $i -le $Attempts; $i++) {
-                  try {
-                      $response = Invoke-RestMethod `
-                          -Uri "http://127.0.0.1:4040/api/tunnels" `
-                          -TimeoutSec 5 `
-                          -ErrorAction Stop
-
-                      if ($response.tunnels) {
-                          $tcpTunnel = $response.tunnels |
-                              Where-Object { $_.proto -eq "tcp" } |
-                              Select-Object -First 1
-
-                          if ($tcpTunnel -and $tcpTunnel.public_url) {
-                              return $tcpTunnel.public_url
-                          }
-                      }
-                  }
-                  catch {
-                      # API chưa sẵn sàng -> tiếp tục thử
-                  }
-
-                  Start-Sleep -Seconds 5
-              }
-
-              return $null
-          }
-
-          # ------------------------------------------------------------
-          # START NGROK LẦN ĐẦU
-          # ------------------------------------------------------------
-          $ngrokProcess = Start-NgrokTunnel `
-              -Executable $ngrokExe `
-              -Region $region
-
-          Write-Host "⏳ Đợi Ngrok khởi động..."
-          Start-Sleep -Seconds 10
-
-          if ($ngrokProcess.HasExited) {
-              Write-Host "❌ Ngrok thoát ngay sau khi khởi động." -ForegroundColor Red
-              Write-Host "----- NGROK STDERR -----"
-              Get-Content $errLog -ErrorAction SilentlyContinue | Select-Object -Last 50
-              Write-Host "----- NGROK STDOUT -----"
-              Get-Content $outLog -ErrorAction SilentlyContinue | Select-Object -Last 50
-              exit 1
-          }
-
-          $publicUrl = Get-NgrokPublicUrl
-
-          if ($publicUrl) {
-              $rdpAddress = $publicUrl -replace '^tcp://', ''
-
-              Write-Host "======================================================================"
-              Write-Host "  NGROK ĐÃ KẾT NỐI" -ForegroundColor Green
-              Write-Host "  ĐỊA CHỈ RDP : $publicUrl" -ForegroundColor Green
-              Write-Host "  RDP ADDRESS : $rdpAddress" -ForegroundColor Green
-              Write-Host "======================================================================"
-              Write-Host "  Remote Desktop -> Computer: $rdpAddress"
-              Write-Host "  User: DucthengTechDz"
-              Write-Host "======================================================================"
-          }
-          else {
-              Write-Host "❌ Không lấy được public URL từ Ngrok." -ForegroundColor Red
-              Write-Host "----- NGROK STDERR -----"
-              Get-Content $errLog -ErrorAction SilentlyContinue | Select-Object -Last 50
-              Write-Host "----- NGROK STDOUT -----"
-              Get-Content $outLog -ErrorAction SilentlyContinue | Select-Object -Last 50
-
-              Stop-Process -Id $ngrokProcess.Id -Force -ErrorAction SilentlyContinue
-              exit 1
-          }
-
-          # ------------------------------------------------------------
-          # KEEP ALIVE 6 GIỜ
-          # ------------------------------------------------------------
-          $duration = 21600
-          $startTime = Get-Date
-          $lastLog = -900
-
-          Write-Host "🕐 Bắt đầu giữ kết nối 6 tiếng..."
-
-          while ($true) {
-              $elapsed = ((Get-Date) - $startTime).TotalSeconds
-
-              if ($elapsed -ge $duration) {
-                  break
-              }
-
-              # --------------------------------------------------------
-              # KIỂM TRA NGROK PROCESS
-              # --------------------------------------------------------
-              if ($null -eq $ngrokProcess -or $ngrokProcess.HasExited) {
-                  Write-Host "⚠️ Ngrok đã dừng. Đang khởi động lại..." -ForegroundColor Yellow
-
-                  $ngrokProcess = Start-NgrokTunnel `
-                      -Executable $ngrokExe `
-                      -Region $region
-
-                  Start-Sleep -Seconds 10
-
-                  if ($ngrokProcess.HasExited) {
-                      Write-Host "❌ Ngrok khởi động lại thất bại." -ForegroundColor Red
-                      Get-Content $errLog -ErrorAction SilentlyContinue | Select-Object -Last 30
-                      Start-Sleep -Seconds 15
-                      continue
-                  }
-
-                  $publicUrl = Get-NgrokPublicUrl -Attempts 10
-
-                  if ($publicUrl) {
-                      $rdpAddress = $publicUrl -replace '^tcp://', ''
-                      Write-Host "✓ Ngrok đã khởi động lại." -ForegroundColor Green
-                      Write-Host "🌐 Địa chỉ RDP mới: $publicUrl" -ForegroundColor Green
-                      Write-Host "🌐 RDP ADDRESS: $rdpAddress" -ForegroundColor Green
-                  }
-                  else {
-                      Write-Warning "Ngrok đã chạy nhưng chưa lấy được URL mới."
-                  }
-              }
-
-              # --------------------------------------------------------
-              # LOG MỖI 15 PHÚT
-              # --------------------------------------------------------
-              if (($elapsed - $lastLog) -ge 900) {
-                  $mins = [int]($elapsed / 60)
-                  $remain = [int](($duration - $elapsed) / 60)
-
-                  Write-Host "⏱️ Đã chạy: $mins phút | Còn lại: $remain phút"
-
-                  if ($publicUrl) {
-                      Write-Host "🌐 RDP: $publicUrl"
-                  }
-
-                  $lastLog = $elapsed
-              }
-
-              Start-Sleep -Seconds 30
-          }
-
-          # ------------------------------------------------------------
-          # KẾT THÚC 6 GIỜ
-          # ------------------------------------------------------------
-          Write-Host ""
-          Write-Host "⏰ Đã hết 6 tiếng. Dọn dẹp Ngrok..." -ForegroundColor Yellow
-
-          if ($ngrokProcess -and -not $ngrokProcess.HasExited) {
-              Stop-Process `
-                  -Id $ngrokProcess.Id `
-                  -Force `
-                  -ErrorAction SilentlyContinue
-          }
-
-          Get-Process -Name "ngrok" -ErrorAction SilentlyContinue |
-              Stop-Process -Force -ErrorAction SilentlyContinue
-
-          Write-Host "✅ Workflow hoàn tất!"
+    - name: Cleanup
+      if: always()
+      run: |
+        $ngrokProcess = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
+        if ($ngrokProcess) {
+          Write-Host "Terminating Ngrok process..."
+          $ngrokProcess | Stop-Process -Force
+        }
+        
+        Write-Host "Cleanup complete."
